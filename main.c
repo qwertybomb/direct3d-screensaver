@@ -655,7 +655,7 @@ static DWORD __stdcall render_thread(void *const context)
 static uint32_t parse_u32(wchar_t const *string)
 {
     uint32_t result = 0;
-    while (*string != '\0')
+    while (*string != L\0')
     {
         result *= 10;
         result += *string - L'0';
@@ -682,10 +682,10 @@ void entry(void)
         wchar_t const *const argument = argv[i] + 1;
         switch(*argument)
         {
-            case 'S':
-            case 's':
+            case L'S':
+            case L's':
             {
-                if (argument[1] == '\0')
+                if (argument[1] == L'\0')
                 {
                     mode = FULLSCREEN_MODE;
                 }
@@ -693,17 +693,17 @@ void entry(void)
                 break;
             }
 
-            case 'C':
-            case 'c':
+            case L'C':
+            case L'c':
             {
                 mode = DIALOG_MODE;
                 break;
             }
 
-            case 'p':
-            case 'P':
+            case L'p':
+            case L'P':
             {
-                if (argument[1] != '\0')
+                if (argument[1] != L'\0')
                 {
                     argument_param = parse_u32(argument + 1);
                 }
@@ -720,8 +720,8 @@ void entry(void)
                 break;
             }
 
-            case 'w':
-            case 'W':
+            case L'w':
+            case L'W':
             {
                 mode = WINDOW_MODE;
                 break;
