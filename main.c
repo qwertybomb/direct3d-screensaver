@@ -48,6 +48,7 @@ typedef __declspec(align(16)) struct
 {
     float aspect_ratio;
     float timer;
+    float pixel_width;
 } ShaderConstants;
 #pragma pack(pop)
 
@@ -633,6 +634,7 @@ static __stdcall DWORD render_thread(void *const context)
             
             shader_constants->aspect_ratio = (float)state->height / (float)state->width;
             shader_constants->timer = current_time;
+            shader_constants->pixel_width = 1.0f / (float)state->height;
             
             state->device_context->lpVtbl->Unmap(state->device_context,
                                                  (ID3D11Resource *)

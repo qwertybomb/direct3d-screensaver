@@ -2,6 +2,7 @@ cbuffer constants : register (b0)
 {
     float aspect_ratio;
     float timer;
+    float pixel_width;
 }
 
 struct vs_out
@@ -200,7 +201,7 @@ DistanceInfo combine_sdf(DistanceInfo a, DistanceInfo b)
 
 float hexagon_hash(float2 seed)
 {
-    return hash12(seed) * 0.5f + 0.25f;
+    return hash12(seed) * 1.3f;
 }
 
 // from https://www.shadertoy.com/view/MsVfz1
@@ -213,7 +214,7 @@ float hexagon_pylon(float2 p2, float pz, float r, float ht)
     p.xz = abs(p.xz);
     p.xz = float2(p.x*.866025 + p.z*.5, p.z);
     
-  	return length(max(abs(p) - b + .01, 0.)) - .01;
+    return length(max(abs(p) - b + .01, 0.)) - .01;
 }
 
 float2 hexagon_sdf(float2 p, float pH)
@@ -270,27 +271,29 @@ DistanceInfo distance_function(float3 pos)
 {
     float3 old_pos = pos;
 
-    pos.y += .7f;
+    pos.y += .5f;
     pos.xy = mul(pos.xy, rotation_matrix(timer));
     pos.xz = mul(pos.xz, rotation_matrix(-timer));
     
     DistanceInfo distance;
     {
-        distance = make_distance_info(windows_logo_3d_sdf(pos, 0.1f), 1.0f);
+        distance = make_distance_info(windows_logo_3d_sdf(pos, 0.1f));
     }
     
-	{
-		float light_sdf = length(max(abs(old_pos - float3(2.0, 2.0f, 0)) -
-						  float3(3.f, 0.01f, 3.f), 0.0f));
+    {
+        float light_sdf = length(max(abs(old_pos - float3(2.0, 2.0f, 0)) -
+                          float3(3.f, 0.01f, 3.f), 0.0f));
 
-		distance = combine_sdf(distance,
-							   make_distance_info(float2(light_sdf, 9.0f),
+        distance = combine_sdf(distance,
+                               make_distance_info(float2(light_sdf, 9.0f),
                                                   float3(1, 1, 1)));
 	}
 
     {
         old_pos.y += 2.3f;
-        old_pos.xz += float2(sin(timer * 2.0f), cos(timer * 2.0f)) * 0.01f;
+        old_pos.xz += float2(sin(timer * 2.0f),
+                             cos(timer * 2.0f)) * 0.01f;
+
         float2 hexagon_board = hexagon_sdf(old_pos.xz, -old_pos.y);
         
         distance =
@@ -368,7 +371,7 @@ float4 ps_main(vs_out input) : SV_TARGET
 {
     float2 coords = input.texture_coord;
 
-    const float slider = 0.2f;
+    const float slider = 0.8f;
     float3 ray_pos = float3(0, .8 - slider, 3.4f);
     float3 look_at = float3(0, .6 - slider, 2.8f);
     
@@ -383,7 +386,7 @@ float4 ps_main(vs_out input) : SV_TARGET
         
         Ray ray = look_at_ray(ray_pos, look_at,
                               to_radians(60.0f),
-                              coords + hash22(seed) * 0.002f);
+                              coords + hash22(seed) * pixel_width * 2.0f);
 
         for (int i = 0; i < 6; ++i)
         {
