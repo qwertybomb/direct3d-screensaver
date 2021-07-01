@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#pragma warning(push, 0)
 #define UNICODE
 #include <Windows.h>
 #include <shellscalingapi.h>
@@ -9,6 +10,7 @@
 #include <dxgi.h>
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
+#pragma warning(pop)
 
 #ifdef RELEASE_BUILD
 static
@@ -41,6 +43,7 @@ extern int _fltused;
 int _fltused;
 
 #define WAKE_THRESHOLD 4
+#define BLACK_WINDOW_CLASS L"black_window_class"
 
 // force our struct's size to be a multiple of 16 bytes
 #pragma pack(push, 16)
@@ -587,7 +590,7 @@ leave:
 }
 #endif
 
-static __stdcall DWORD render_thread(void *const context)
+static DWORD __stdcall render_thread(void *const context)
 {
     State *const state = context;
 
@@ -647,8 +650,6 @@ static __stdcall DWORD render_thread(void *const context)
         state_reload_shader(state, &old_file_attribute_data);
 #endif
     }
-
-    return 0;
 }
 
 static uint32_t parse_u32(wchar_t const *string)
@@ -664,39 +665,6 @@ static uint32_t parse_u32(wchar_t const *string)
     return result;
 }
 
-typedef struct
-{
-    ModeType window_mode_type;
-    uint32_t const window_handle_param;
-} MonitorEnumerationProcedureData;
-
-static void create_renderer(ModeType const mode,
-                            uint32_t const handle_param)
-{
-    static State state; 
-    state_create_window(&state, 900, 600, mode, handle_param);
-    state_setup_d3d(&state, mode != FULLSCREEN_MODE);
-        
-    // create a separate render thread so the rendering is not blocked by the Message Pump
-    CreateThread(NULL, 0, &render_thread, &state, 0, NULL);
-}
-
-static LRESULT __stdcall BlackWindowProc(HWND const hWnd, UINT const message,
-                                         WPARAM const wParam, LPARAM const lParam)
-{
-    switch(message)
-    {
-        case WM_SETCURSOR:
-        {
-            // hide the cursor
-            SetCursor(NULL);
-            return TRUE;
-        }
-    }
-
-    return DefWindowProcW(hWnd, message, wParam, lParam);
-}
-
 void entry(void);
 void entry(void)
 {
@@ -705,7 +673,7 @@ void entry(void)
 
     if (argc < 2) return;
 
-    uint32_t window_handle_param;
+    uint32_t argument_param = 0;
     ModeType mode = NOTHING_MODE;
     for (int i = 1; i < argc; ++i)
     {
@@ -737,11 +705,11 @@ void entry(void)
             {
                 if (argument[1] != '\0')
                 {
-                    window_handle_param = parse_u32(argument + 1);
+                    argument_param = parse_u32(argument + 1);
                 }
                 else if (i + 1  < argc)
                 {
-                    window_handle_param = parse_u32(argv[i + 1]);
+                    argument_param = parse_u32(argv[i + 1]);
                 }
                 else
                 {
@@ -770,14 +738,14 @@ void entry(void)
     {
         RegisterClassW(&(WNDCLASS)
                        {
-                           .lpszClassName = L"black_window",
-                           .lpfnWndProc = BlackWindowProc,
+                           .lpszClassName = BLACK_WINDOW_CLASS,
+                           .lpfnWndProc = &ScreenSaverProc,
                            .hInstance = GetModuleHandleW(NULL),
                            .hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH),
                        });
 
         ShowWindow(CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                                   L"black_window", L"",
+                                   BLACK_WINDOW_CLASS, L"",
                                    WS_POPUP | WS_VISIBLE,
                                    GetSystemMetrics(SM_XVIRTUALSCREEN),
                                    GetSystemMetrics(SM_YVIRTUALSCREEN),
@@ -786,8 +754,13 @@ void entry(void)
                                    NULL, NULL, GetModuleHandleW(NULL), NULL), SW_SHOW);
  
     }
-    
-    create_renderer(mode, window_handle_param);
+
+    State state = {0}; 
+    state_create_window(&state, 900, 600, mode, argument_param);
+    state_setup_d3d(&state, mode != FULLSCREEN_MODE);
+        
+    // create a separate render thread so the rendering is not blocked by the Message Pump
+    CreateThread(NULL, 0, &render_thread, &state, 0, NULL);
     
     // start the message pump
     for (;;)

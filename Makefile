@@ -1,7 +1,7 @@
 cc=clang-cl
 mode=release
 name=prog.scr
-flags=-GS- -W4 -permissive- -Xclang -std=c11
+flags=-GS- -W4 -permissive- -wd4324 -nologo
 libs=d3d11.lib dxgi.lib dxguid.lib d3dcompiler.lib user32.lib kernel32.lib Gdi32.lib shell32.lib Shcore.lib
 link_flags=-subsystem:windows -entry:entry -nodefaultlib -out:$(name) $(libs)
 
