@@ -201,7 +201,7 @@ DistanceInfo combine_sdf(DistanceInfo a, DistanceInfo b)
 
 float hexagon_hash(float2 seed)
 {
-    return hash12(seed) * (1.3f + (sin(timer + dot(seed, seed))) * 0.5f);
+    return hash12(seed) * (1.05f + sin((timer + dot(seed, seed)) * 5.0f) * 0.25f);
 }
 
 // from https://www.shadertoy.com/view/MsVfz1
@@ -235,10 +235,6 @@ float2 hexagon_sdf(float2 p, float pH)
     // Hexagon height.
     float4 ht = float4(hexagon_hash(hC.xy), hexagon_hash(hC.zw),
                        hexagon_hash(hC2.xy), hexagon_hash(hC2.zw));
-    
-    // Restricting the heights to five levels... The ".02" was a hack to take out the lights
-    // on the ground tiles, or something. :)
-    ht = floor(ht*4.99)/4./2. + .02;
 
     // The pylon radius. Lower numbers leave gaps, and heigher numbers give overlap. There's not a 
     // lot of room for movement, so numbers above ".3," or so give artefacts.
@@ -291,9 +287,8 @@ DistanceInfo distance_function(float3 pos)
 
     {
         old_pos.y += 2.3f;
-        old_pos.xz += float2(sin(timer * 2.0f),
-                             cos(timer * 2.0f)) * 0.01f;
-        old_pos.z += timer;
+        old_pos.xz += float2(sin(timer), cos(timer)) * cos(timer);
+        old_pos.xz += float2(sin(timer) + timer, cos(timer) + timer);
 
         float2 hexagon_board = hexagon_sdf(old_pos.xz, -old_pos.y);
         
