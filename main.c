@@ -655,7 +655,7 @@ static DWORD __stdcall render_thread(void *const context)
 static uint32_t parse_u32(wchar_t const *string)
 {
     uint32_t result = 0;
-    while (*string != L\0')
+    while (*string != L'\0')
     {
         result *= 10;
         result += *string - L'0';

@@ -201,7 +201,7 @@ DistanceInfo combine_sdf(DistanceInfo a, DistanceInfo b)
 
 float hexagon_hash(float2 seed)
 {
-    return hash12(seed) * 1.3f;
+    return hash12(seed) * (1.3f + (sin(timer + dot(seed, seed))) * 0.5f);
 }
 
 // from https://www.shadertoy.com/view/MsVfz1
@@ -293,6 +293,7 @@ DistanceInfo distance_function(float3 pos)
         old_pos.y += 2.3f;
         old_pos.xz += float2(sin(timer * 2.0f),
                              cos(timer * 2.0f)) * 0.01f;
+        old_pos.z += timer;
 
         float2 hexagon_board = hexagon_sdf(old_pos.xz, -old_pos.y);
         
