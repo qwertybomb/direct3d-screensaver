@@ -7,9 +7,9 @@ link_flags=-subsystem:windows -entry:entry -nodefaultlib -out:$(name) $(libs)
 
 ifeq ($(mode), release)
 flags+=-DRELEASE_BUILD
-flags+=-O2
+flags+=-O2 -Oi
 else
-flags+=-Od -Zi
+flags+=-Od -Zi -DSHADER_HOT_RELOAD
 link_flag+=-debug
 endif
 
@@ -22,4 +22,5 @@ pixel_shader.h vertex_shader.h: shaders.hlsl
 ifeq ($(mode), release)
 	@fxc -O3 -Fh pixel_shader.h -T ps_5_0 -E ps_main -nologo shaders.hlsl
 	@fxc -O3 -Fh vertex_shader.h -T vs_5_0 -E vs_main -nologo shaders.hlsl
+	@fxc -O3 -Fh post_pixel_shader.h -T ps_5_0 -E post_ps_main -nologo shaders.hlsl
 endif

@@ -4,9 +4,8 @@
 #pragma warning(push, 0)
 #define UNICODE
 #include <Windows.h>
-#include <shellscalingapi.h>
-#undef UNICODE
 
+#define COBJMACROS
 #include <dxgi.h>
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
@@ -15,6 +14,9 @@
 #ifdef RELEASE_BUILD
 static
 #include "pixel_shader.h"
+
+static
+#include "post_pixel_shader.h"
 
 static
 #include "vertex_shader.h"
@@ -44,6 +46,7 @@ int _fltused;
 
 #define WAKE_THRESHOLD 4
 #define BLACK_WINDOW_CLASS L"black_window_class"
+#define ARRAY_COUNT(...) (sizeof((__VA_ARGS__)) / sizeof(*(__VA_ARGS__)))
 
 // force our struct's size to be a multiple of 16 bytes
 #pragma pack(push, 16)
@@ -66,6 +69,13 @@ typedef enum
 
 typedef struct
 {
+    ID3D11Texture2D *texture;
+    ID3D11RenderTargetView *texture_view;
+    ID3D11ShaderResourceView *texture_shader_view; 
+} RenderTexture;
+
+typedef struct
+{
     HWND window_handle;
     ID3D11Device *device;
     ID3D11DeviceContext *device_context;
@@ -76,70 +86,29 @@ typedef struct
     
     ID3D11VertexShader *vertex_shader;
     ID3D11PixelShader *pixel_shader;
+    ID3D11PixelShader *post_pixel_shader;
     
     ID3D11Buffer *constant_buffer;
 
+    RenderTexture render_textures[2];
+    ID3D11SamplerState *render_texture_sampler;
+    
     int width;
     int height;
 } State;
 
-__declspec(dllexport) unsigned long NvOptimusEnablement = 0x0000001;
 
-static void state_handle_resize(State *const this,
-                                int const new_width,
-                                int const new_height)
+static void get_client_size(HWND const window,
+                            int *const x, int *const y)
 {
-    if ((new_width    ==          0 || new_height   ==  0) ||
-        (this->width  ==  new_width && this->height == new_height))
-    {
-        this->width = new_width;
-        this->height = new_height;
-        return; 
-    }
-    
-    this->width = new_width;
-    this->height = new_height;
-    
-     // unbind render target
-     this->device_context->lpVtbl->OMSetRenderTargets(this->device_context, 0,
-                                                      &(ID3D11RenderTargetView *) {NULL}, NULL);
-     
-     // release frame_buffer view
-     this->frame_buffer_view->lpVtbl->Release(this->frame_buffer_view);
-     
-     // let things finish
-     this->device_context->lpVtbl->Flush(this->device_context);
-     
-     this->swap_chain->lpVtbl->ResizeBuffers(this->swap_chain, 0,
-                                             (int unsigned) this->width,
-                                             (int unsigned) this->height,
-                                             DXGI_FORMAT_UNKNOWN, 0);
+    RECT rect;
+    GetClientRect(window, &rect);
 
-     ID3D11Texture2D *window_buffer;
-     this->swap_chain->lpVtbl->GetBuffer(this->swap_chain, 0,
-                                         &IID_ID3D11Texture2D,
-                                         (void **) &window_buffer);
-     
-     this->device->lpVtbl->CreateRenderTargetView(this->device,
-                                                  (ID3D11Resource *)window_buffer,
-                                                  NULL, &this->frame_buffer_view);
-
-     // release the buffer
-     window_buffer->lpVtbl->Release(window_buffer);
-
-     this->device_context->lpVtbl->OMSetRenderTargets(this->device_context, 1,
-                                                      &this->frame_buffer_view, NULL);
-
-         
-    // get the size of the portion of the window that we can draw to
-    this->device_context->lpVtbl->RSSetViewports(this->device_context, 1,
-                                                 &(D3D11_VIEWPORT) {
-                                                     .Width = (float)this->width,
-                                                     .Height = (float)this->height,
-                                                     .MinDepth = 0.0f,
-                                                     .MaxDepth = 1.0f,
-                                                 });
+    *x = rect.right - rect.left;
+    *y = rect.bottom - rect.top;
 }
+
+__declspec(dllexport) unsigned long NvOptimusEnablement = 0x0000001;
 
 static LRESULT __stdcall WindowProc(HWND const window_handle, UINT const message,
                                     WPARAM const wParam, LPARAM const lParam)
@@ -155,9 +124,10 @@ static LRESULT __stdcall WindowProc(HWND const window_handle, UINT const message
             {
                 PostQuitMessage(0);
             }
+            
             break;
         }
-        
+
         case WM_QUIT:
         case WM_CLOSE:
         case WM_DESTROY:
@@ -249,7 +219,6 @@ static LRESULT __stdcall ScreenSaverProc(HWND const hWnd, UINT const message,
             SetCursor(NULL);
             return TRUE;
         }
-
 
         case WM_QUIT:
         case WM_CLOSE:
@@ -344,7 +313,49 @@ static void state_create_window(State *const this,
                                           window_handle, NULL,
                                           instance_handle, NULL);
 
+    // adjust width and height to actual client size
+    get_client_size(this->window_handle, &this->width, &this->height);
+    
     ShowWindow(this->window_handle, SW_SHOWDEFAULT);
+}
+
+static void state_create_d3d_textures(State *const this)
+{
+    for (int i = 0; i < 2; ++i)
+    {
+        this->device->lpVtbl->CreateTexture2D(this->device,
+                                              &(D3D11_TEXTURE2D_DESC)
+                                              {
+                                                  .Width = this->width,
+                                                  .Height = this->height,
+                                                  .MipLevels = 1,
+                                                  .ArraySize = 1,
+                                                  .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                  .SampleDesc.Count = 1,
+                                                  .Usage = D3D11_USAGE_DEFAULT,
+                                                  .BindFlags = (D3D11_BIND_RENDER_TARGET |
+                                                                D3D11_BIND_SHADER_RESOURCE),    
+                                              }, NULL,
+                                              &this->render_textures[i].texture);
+
+        ID3D11Device_CreateRenderTargetView(this->device,
+                                            (ID3D11Resource*)this->render_textures[i].texture,
+                                            NULL, &this->render_textures[i].texture_view);
+        
+        ID3D11Device_CreateShaderResourceView(this->device,
+                                              (ID3D11Resource*)this->render_textures[i].texture,
+                                              NULL, &this->render_textures[i].texture_shader_view);
+    }
+}
+
+static void state_destroy_d3d_textures(State *const this)
+{
+    for (int i = 0; i < 2; ++i)
+    {
+        ID3D11RenderTargetView_Release(this->render_textures[i].texture_view);
+        ID3D11ShaderResourceView_Release(this->render_textures[i].texture_shader_view);
+        ID3D11Texture2D_Release(this->render_textures[i].texture);
+    }
 }
 
 static void state_setup_d3d(State *const this, bool is_windowed)
@@ -374,7 +385,7 @@ static void state_setup_d3d(State *const this, bool is_windowed)
         dxgi_device->lpVtbl->GetAdapter(dxgi_device, &dxgi_adapter);
         
         dxgi_adapter->lpVtbl->GetParent(dxgi_adapter,
-                                        &IID_IDXGIFactory,
+                                        &IID_IDXGIFactory4,
                                         (void **)&dxgi_factory);
 
         dxgi_adapter->lpVtbl->Release(dxgi_adapter);
@@ -392,17 +403,24 @@ static void state_setup_d3d(State *const this, bool is_windowed)
                                                      .SampleDesc.Quality = 0,
                                                      .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
                                                      .BufferCount = 2,
-                                                     .Scaling = DXGI_SCALING_NONE,
+                                                     .Scaling = DXGI_SCALING_STRETCH,
                                                      .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
                                                      .AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED
                                                  }, NULL, NULL, &this->swap_chain);
 
-    dxgi_factory->lpVtbl->Release(dxgi_factory);
-    
     if (!is_windowed)
     {
         this->swap_chain->lpVtbl->SetFullscreenState(this->swap_chain, false, NULL);
     }
+    else
+    {
+        // disable alt-enter
+        dxgi_factory->lpVtbl->MakeWindowAssociation(dxgi_factory,
+                                                    this->window_handle,
+                                                    DXGI_MWA_NO_ALT_ENTER);
+    }
+    
+    dxgi_factory->lpVtbl->Release(dxgi_factory);
     
     ID3D11Texture2D *frame_buffer;
     this->swap_chain->lpVtbl->GetBuffer(this->swap_chain, 0,
@@ -451,32 +469,52 @@ static void state_setup_d3d(State *const this, bool is_windowed)
 #endif
         
 #ifndef RELEASE_BUILD
-    ID3DBlob *pixel_shader_blob;
-    result =  D3DCompileFromFile(L"shaders.hlsl", NULL,
-                                 D3D_COMPILE_STANDARD_FILE_INCLUDE,
-                                 "ps_main", "ps_5_0", D3DCOMPILE_ENABLE_STRICTNESS, 0,
-                                 &pixel_shader_blob, &error_blob);
 
-    if (FAILED(result))
-    {
-        MessageBoxA(this->window_handle,
-                    error_blob->lpVtbl->GetBufferPointer(error_blob), "error:", MB_OK);
-        ExitProcess(1);
-    }
+#define COMPILE_PIXEL_SHADER(entry_point, shader)                       \
+    do                                                                  \
+    {                                                                   \
+                                                                        \
+        ID3DBlob *shader_blob;                                          \
+        result =  D3DCompileFromFile(L"shaders.hlsl", NULL,             \
+                                     D3D_COMPILE_STANDARD_FILE_INCLUDE, \
+                                     entry_point, "ps_5_0",             \
+                                     D3DCOMPILE_ENABLE_STRICTNESS |     \
+                                     D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, \
+                                     &shader_blob, &error_blob);        \
+                                                                        \
+        if (FAILED(result))                                             \
+        {                                                               \
+            MessageBoxA(this->window_handle,                            \
+                        ID3D10Blob_GetBufferPointer(error_blob),        \
+                        "error:", MB_OK);                               \
+            ExitProcess(1);                                             \
+        }                                                               \
+                                                                        \
+        void *const data = ID3D10Blob_GetBufferPointer(shader_blob);    \
+        DWORD const data_size = ID3D10Blob_GetBufferSize(shader_blob);  \
+                                                                        \
+        this->device->lpVtbl->CreatePixelShader(this->device,           \
+                                                data, data_size,        \
+                                                NULL, &shader);         \
+                                                                        \
+        ID3D10Blob_Release(shader_blob);                                \
+    } while(false)
     
-    this->device->lpVtbl->CreatePixelShader(this->device,
-                                            pixel_shader_blob->lpVtbl->GetBufferPointer(pixel_shader_blob),
-                                            pixel_shader_blob->lpVtbl->GetBufferSize(pixel_shader_blob),
-                                            NULL, &this->pixel_shader);
+    COMPILE_PIXEL_SHADER("ps_main", this->pixel_shader);
+    COMPILE_PIXEL_SHADER("post_ps_main", this->post_pixel_shader);
+    
 #else
     this->device->lpVtbl->CreatePixelShader(this->device,
                                             g_ps_main, sizeof g_ps_main,
                                             NULL, &this->pixel_shader);
+    
+    this->device->lpVtbl->CreatePixelShader(this->device,
+                                            g_post_ps_main,
+                                            sizeof g_post_ps_main,
+                                            NULL, &this->post_pixel_shader);
 #endif
  
 #ifndef RELEASE_BUILD
-    // release shader blobs
-    pixel_shader_blob->lpVtbl->Release(pixel_shader_blob);
     vertex_shader_blob->lpVtbl->Release(vertex_shader_blob);
 #endif
     
@@ -487,7 +525,17 @@ static void state_setup_d3d(State *const this, bool is_windowed)
                                            .BindFlags  = D3D11_BIND_CONSTANT_BUFFER,
                                            .CPUAccessFlags = D3D11_CPU_ACCESS_WRITE
                                        }, NULL, &this->constant_buffer);
-         
+
+    state_create_d3d_textures(this);
+    ID3D11Device_CreateSamplerState(this->device,
+                                    (&(D3D11_SAMPLER_DESC)
+                                     {
+                                         .Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                                         .AddressU = D3D11_TEXTURE_ADDRESS_CLAMP,
+                                         .AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
+                                         .AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
+                                     }), &this->render_texture_sampler);
+    
     // get the size of the portion of the window that we can draw to
     this->device_context->lpVtbl->RSSetViewports(this->device_context, 1,
                                                  &(D3D11_VIEWPORT) {
@@ -498,10 +546,63 @@ static void state_setup_d3d(State *const this, bool is_windowed)
                                                  });
 }
 
-static void state_draw(State *const this)
-{       
+static void state_handle_resize(State *const this,
+                                int const new_width,
+                                int const new_height)
+{
+    if ((new_width    ==          0 || new_height   ==  0) ||
+        (this->width  ==  new_width && this->height == new_height))
+    {
+        this->width = new_width;
+        this->height = new_height;
+        return; 
+    }
+    
+    this->width = new_width;
+    this->height = new_height;
+
+    state_destroy_d3d_textures(this);
+    state_create_d3d_textures(this);
+    
+    // release frame_buffer view
+    this->frame_buffer_view->lpVtbl->Release(this->frame_buffer_view);
+     
+    this->swap_chain->lpVtbl->ResizeBuffers(this->swap_chain, 0, 0, 0,
+                                            DXGI_FORMAT_UNKNOWN, 0);
+    
+    ID3D11Texture2D *window_buffer;
+    this->swap_chain->lpVtbl->GetBuffer(this->swap_chain, 0,
+                                        &IID_ID3D11Texture2D,
+                                        (void **) &window_buffer);
+     
+    this->device->lpVtbl->CreateRenderTargetView(this->device,
+                                                 (ID3D11Resource *)window_buffer,
+                                                 NULL, &this->frame_buffer_view);
+
+    // release the buffer
+    window_buffer->lpVtbl->Release(window_buffer);
+
     this->device_context->lpVtbl->OMSetRenderTargets(this->device_context, 1,
                                                      &this->frame_buffer_view, NULL);
+
+    // get the size of the portion of the window that we can draw to
+    this->device_context->lpVtbl->RSSetViewports(this->device_context, 1,
+                                                 &(D3D11_VIEWPORT) {
+                                                     .Width = (float)this->width,
+                                                     .Height = (float)this->height,
+                                                     .MinDepth = 0.0f,
+                                                     .MaxDepth = 1.0f,
+                                                 });
+}
+
+
+static void state_draw(State *const this)
+{
+    ID3D11DeviceContext_OMSetRenderTargets(this->device_context, 2,
+                                           ((ID3D11RenderTargetView*[]) {
+                                               this->render_textures[0].texture_view,
+                                               this->render_textures[1].texture_view
+                                           }), NULL);
     
     // clear background color to black
     this->device_context->lpVtbl->ClearRenderTargetView(this->device_context,
@@ -512,18 +613,52 @@ static void state_draw(State *const this)
     this->device_context->lpVtbl->IASetPrimitiveTopology(this->device_context,
                                                          D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     
-    this->device_context->lpVtbl->VSSetShader(this->device_context, this->vertex_shader, NULL, 0);
-    this->device_context->lpVtbl->PSSetShader(this->device_context, this->pixel_shader, NULL, 0);
+    this->device_context->lpVtbl->VSSetShader(this->device_context,
+                                              this->vertex_shader, NULL, 0);
+    
+    this->device_context->lpVtbl->PSSetShader(this->device_context,
+                                              this->pixel_shader, NULL, 0);
     
     this->device_context->lpVtbl->PSSetConstantBuffers(this->device_context, 0,
                                                        1, &this->constant_buffer);
     
-    // draw the shaders and swap the front/back buffer
+    // draw the shaders
     this->device_context->lpVtbl->Draw(this->device_context, 4, 0);
+
+    // unbind render target
+    this->device_context->lpVtbl->OMSetRenderTargets(this->device_context, 2,
+                                                     (ID3D11RenderTargetView*[2]){0},
+                                                     NULL);
+    
+    // bind swapchain render target
+    this->device_context->lpVtbl->OMSetRenderTargets(this->device_context, 1,
+                                                     &this->frame_buffer_view,
+                                                     NULL);
+   
+    this->device_context->lpVtbl->PSSetShader(this->device_context,
+                                              this->post_pixel_shader, NULL, 0);
+
+    this->device_context->lpVtbl->PSSetSamplers(this->device_context, 0, 1,
+                                                &this->render_texture_sampler);
+    
+    ID3D11DeviceContext_PSSetShaderResources(this->device_context, 0, 2,
+                                             ((ID3D11ShaderResourceView*[])
+                                             {
+                                                 this->render_textures[0].texture_shader_view,
+                                                 this->render_textures[1].texture_shader_view,
+                                             }));
+    
+    // draw the shaders
+    this->device_context->lpVtbl->Draw(this->device_context, 4, 0);
+
+    ID3D11DeviceContext_PSSetShaderResources(this->device_context, 0, 2,
+                                             (ID3D11ShaderResourceView*[2]){0});
+    
+    // swap the front/back buffer
     this->swap_chain->lpVtbl->Present(this->swap_chain, 1, 0);
 }
 
-#ifndef RELEASE_BUILD
+#ifdef SHADER_HOT_RELOAD
 static bool compare_file_times(FILETIME const a, FILETIME const b)
 {
     return
@@ -545,23 +680,34 @@ static void state_reload_shader(State *const this,
     {
         return;
     }
-
-
+    
+    ID3D11PixelShader **pixel_shaders[] =
+    {
+        &this->pixel_shader,
+        &this->post_pixel_shader
+    };
+    
+    char const *pixel_shader_entrys[] = {
+        "ps_main", "post_ps_main",
+    };
+    
     ID3DBlob *error_blob = NULL;
-    ID3DBlob *pixel_shader_blob = NULL;
+    ID3DBlob *pixel_shader_blobs[2] = {0};
 
-    for(;;)
+    for(size_t i = 0;;)
     {
         HRESULT result = D3DCompileFromFile(L"shaders.hlsl", NULL,
                                             D3D_COMPILE_STANDARD_FILE_INCLUDE,
-                                            "ps_main", "ps_5_0",
-                                            D3DCOMPILE_ENABLE_STRICTNESS, 0,
-                                            &pixel_shader_blob, &error_blob);
+                                            pixel_shader_entrys[i], "ps_5_0",
+                                            D3DCOMPILE_ENABLE_STRICTNESS |
+                                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                                            pixel_shader_blobs + i, &error_blob);
         // if the file is in use try again
         if ((result & 0x0000FFFF) == ERROR_SHARING_VIOLATION)
         {
             continue;
         }
+        
         else if (FAILED(result))
         {
             MessageBoxA(this->window_handle,
@@ -573,18 +719,20 @@ static void state_reload_shader(State *const this,
         
             goto leave;
         }
-
-        break;
-    }
         
-    this->pixel_shader->lpVtbl->Release(this->pixel_shader);
-    this->device->lpVtbl->CreatePixelShader(this->device,
-                                            pixel_shader_blob->lpVtbl->GetBufferPointer(pixel_shader_blob),
-                                            pixel_shader_blob->lpVtbl->GetBufferSize(pixel_shader_blob),
-                                            NULL, &this->pixel_shader);
+        (*pixel_shaders[i])->lpVtbl->Release(*pixel_shaders[i]);
+        this->device->lpVtbl->CreatePixelShader(this->device,
+                                                pixel_shader_blobs[i]->lpVtbl->
+                                                GetBufferPointer(pixel_shader_blobs[i]),
+                                                pixel_shader_blobs[i]->lpVtbl->
+                                                GetBufferSize(pixel_shader_blobs[i]),
+                                                NULL, pixel_shaders[i]);
 
-    pixel_shader_blob->lpVtbl->Release(pixel_shader_blob);
+        pixel_shader_blobs[i]->lpVtbl->Release(pixel_shader_blobs[i]);
 
+
+        if (++i >= ARRAY_COUNT(pixel_shaders)) break;
+    }
 leave:
     old_file_attribute_data->ftLastWriteTime = new_file_attribute_data.ftLastWriteTime;
 }
@@ -600,11 +748,13 @@ static DWORD __stdcall render_thread(void *const context)
     LARGE_INTEGER start_counter;
     QueryPerformanceCounter(&start_counter);
 
+#ifdef SHADER_HOT_RELOAD
     WIN32_FILE_ATTRIBUTE_DATA old_file_attribute_data;
     GetFileAttributesExW(L"shaders.hlsl",
                          GetFileExInfoStandard,
                          &old_file_attribute_data);
-
+#endif
+    
     for(;;)
     {
         LARGE_INTEGER current_counter;
@@ -615,15 +765,6 @@ static DWORD __stdcall render_thread(void *const context)
         
         float const current_time =
             (float)((double)counter_duration / (double)performance_frequency.QuadPart);
-
-        {
-            RECT rect;
-            GetClientRect(state->window_handle, &rect);
-
-            state_handle_resize(state,
-                                rect.right - rect.left,
-                                rect.bottom - rect.top);
-        }
         
         // update shader constants
         {
@@ -645,10 +786,19 @@ static DWORD __stdcall render_thread(void *const context)
         }
         
         state_draw(state);
-
-#ifndef RELEASE_BUILD
+        
+#ifdef SHADER_HOT_RELOAD
         state_reload_shader(state, &old_file_attribute_data);
 #endif
+        
+        {
+            RECT rect;
+            GetClientRect(state->window_handle, &rect);
+
+            state_handle_resize(state,
+                                rect.right - rect.left,
+                                rect.bottom - rect.top);
+        }
     }
 }
 
@@ -665,6 +815,56 @@ static uint32_t parse_u32(wchar_t const *string)
     return result;
 }
 
+// references:
+// https://docs.nvidia.com/gameworks/content/gameworkslibrary/coresdk/nvapi/modules.html
+// https://stackoverflow.com/questions/13291783/how-to-get-the-id-memory-address-of-dll-function
+
+#ifndef NO_FPS_OVERLAY
+static void try_enable_fps_overlay(ID3D11Device *const device)
+{
+    HMODULE nvapi = LoadLibraryW(L"nvapi64.dll");
+    if (nvapi == NULL) return;
+
+    enum
+    {
+        NVAPI_OK = 0,
+    };
+
+    typedef int (__cdecl *NvAPI_InitializeFn)(void);
+    typedef void *(__cdecl *NvApi_QueryInterfaceFn)(uint32_t);
+    typedef int (__cdecl *NvAPI_D3D_SetFPSIndicatorStateFn)(IUnknown *, uint8_t);
+
+    NvApi_QueryInterfaceFn NvApi_QueryInterface =
+        (NvApi_QueryInterfaceFn)GetProcAddress(nvapi, "nvapi_QueryInterface");
+
+    if (NvApi_QueryInterface == NULL) goto nvapi_unload;
+    
+#define NVAPI_LOAD_FN(name, id)                                      \
+    name##Fn name;                                                   \
+    do                                                               \
+    {                                                                \
+        if((name = (name##Fn)NvApi_QueryInterface(id)) == NULL)      \
+        {                                                            \
+            goto nvapi_unload;                                       \
+        }                                                            \
+    } while(false)
+
+    NVAPI_LOAD_FN(NvAPI_Initialize, 0x150E828);
+    NVAPI_LOAD_FN(NvAPI_D3D_SetFPSIndicatorState, 0x0A776E8DB);
+
+    if (NvAPI_Initialize() != NVAPI_OK) goto nvapi_unload;
+    if (NvAPI_D3D_SetFPSIndicatorState((IUnknown*)device, true) != NVAPI_OK)
+    {
+        goto nvapi_unload;
+    }
+    
+#undef NVAPI_LOAD_FN
+    
+nvapi_unload:
+    FreeLibrary(nvapi);
+}
+#endif
+
 void entry(void);
 void entry(void)
 {
@@ -673,6 +873,10 @@ void entry(void)
 
     if (argc < 2) return;
 
+#ifndef NO_FPS_OVERLAY
+    bool have_fps_overlay = false;
+#endif
+    
     uint32_t argument_param = 0;
     ModeType mode = NOTHING_MODE;
     for (int i = 1; i < argc; ++i)
@@ -723,9 +927,27 @@ void entry(void)
             case L'w':
             case L'W':
             {
-                mode = WINDOW_MODE;
+                if (argument[1] == L'\0')
+                {
+                    mode = WINDOW_MODE;
+                }
+                
                 break;
             }
+
+#ifndef NO_FPS_OVERLAY
+            case 'f':
+            case 'F':
+            {
+                if ((argument[1] == L'0' || argument[1] == L'1') &&
+                    argument[2] == L'\0')
+                {
+                    have_fps_overlay = argument[1] - L'0' != 0;
+                }
+                
+                break;
+            }
+#endif
         }
     }
 
@@ -734,6 +956,7 @@ void entry(void)
         return;
     }
 
+    // cause all the other screens to go black when in fullscreen mode
     if (mode == FULLSCREEN_MODE)
     {
         RegisterClassW(&(WNDCLASS)
@@ -758,6 +981,13 @@ void entry(void)
     State state = {0}; 
     state_create_window(&state, 900, 600, mode, argument_param);
     state_setup_d3d(&state, mode != FULLSCREEN_MODE);
+
+#ifndef NO_FPS_OVERLAY
+    if (have_fps_overlay)
+    {
+        try_enable_fps_overlay(state.device);
+    }
+#endif
         
     // create a separate render thread so the rendering is not blocked by the Message Pump
     CreateThread(NULL, 0, &render_thread, &state, 0, NULL);

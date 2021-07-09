@@ -8,16 +8,17 @@ cbuffer constants : register (b0)
 struct vs_out
 {
     float4 position : SV_POSITION;
-    float2 texture_coord : TEX;
+    float2 texture_coords : TEX;
 };
 
 vs_out vs_main(uint vertex_index : SV_VERTEXID)
 {
      vs_out output; 
 
-     float2 texture_coord = float2(vertex_index & 1,vertex_index >> 1);
-     output.position = float4((texture_coord.x - 0.5f) * 2, -(texture_coord.y - 0.5f) * 2, 0, 1);
-     output.texture_coord = 0.5f * output.position.xy + 0.5f;
+     float2 texture_coords = float2(vertex_index & 1, vertex_index >> 1);
+     output.position = float4((texture_coords.x - 0.5f) * 2,
+                              -(texture_coords.y - 0.5f) * 2, 0, 1);
+     output.texture_coords = output.position.xy * 0.5f + 0.5f;
 
      return output;
 }
@@ -54,7 +55,7 @@ float hash12(inout float2 uv)
 
 static const int MAX_STEPS = 100;
 static const float MIN_DISTANCE = 0.001f;
-static const float MAX_DISTANCE = 100.0f;
+static const float MAX_DISTANCE = 8.0f;
 
 struct Ray
 {
@@ -165,25 +166,12 @@ float2 windows_logo_3d_sdf(float3 pos, float extrude)
 struct DistanceInfo
 {
     float2 data;
-    float3 material_info;
 };
 
 DistanceInfo make_distance_info(float2 data)
 {
     DistanceInfo result;
     result.data = data;
-    result.material_info = (float3)0.0f;
-
-    return result;
-}
-
-DistanceInfo make_distance_info(float2 data,
-                                float3 material_info)
-{
-    DistanceInfo result;
-    result.data = data;
-    result.material_info = material_info;
-
     return result;
 }
 
@@ -199,9 +187,9 @@ DistanceInfo combine_sdf(DistanceInfo a, DistanceInfo b)
     }
 }
 
-float hexagon_hash(float2 seed)
+float hexagon_hash(float2 p)
 {
-    return hash12(seed) * (1.05f + sin((timer + dot(seed, seed)) * 5.0f) * 0.25f);
+    return (dot(sin(p * 4.0f - cos(p.yx * 1.4f) + timer), 0.25f) + .5f);
 }
 
 // from https://www.shadertoy.com/view/MsVfz1
@@ -209,12 +197,14 @@ float hexagon_pylon(float2 p2, float pz, float r, float ht)
 {
     float3 p = float3(p2.x, pz, p2.y);
     float3 b = float3(r, ht, r);
-    
+
+    float angle = sin(timer);
+
     // Hexagon.
     p.xz = abs(p.xz);
-    p.xz = float2(p.x*.866025 + p.z*.5, p.z);
+    p.xz = float2(p.x * 0.866025f + p.z * 0.5f, p.z);
     
-    return length(max(abs(p) - b + .01, 0.)) - .01;
+    return length(max(abs(p) - b + 0.005f, 0.)) - 0.005f;
 }
 
 float2 hexagon_sdf(float2 p, float pH)
@@ -226,7 +216,8 @@ float2 hexagon_sdf(float2 p, float pH)
     // center we'll eventually use will depend upon which is closest to the current point. Since 
     // the central hexagon point is unique, it doubles as the unique hexagon ID.
     float4 hC = floor(float4(p, p - float2(0, .5))/s.xyxy) + float4(0, 0, 0, .5);
-    float4 hC2 = floor(float4(p - float2(.5, .25), p - float2(.5, .75))/s.xyxy) + float4(.5, .25, .5, .75);
+    float4 hC2 = floor(float4(p - float2(.5, .25), p - float2(.5, .75))/s.xyxy) +
+                 float4(.5, .25, .5, .75);
     
     // Centering the coordinates with the hexagon centers above.
     float4 h = float4(p - (hC.xy + .5)*s, p - (hC.zw + .5)*s);
@@ -253,7 +244,7 @@ float2 hexagon_sdf(float2 p, float pH)
     h2 = obj.z<obj.w ? float4(h2.xy, hC2.xy) : float4(h2.zw, hC2.zw);
 
     float offsets[4] = {
-        0, 1, 2, 3
+        1, 2, 3, 0
     };
     
     float2 oH = obj.x < obj.y ? float2(obj.x, offsets[0]) : float2(obj.y, offsets[2]);
@@ -270,25 +261,31 @@ DistanceInfo distance_function(float3 pos)
     pos.y += .5f;
     pos.xy = mul(pos.xy, rotation_matrix(timer));
     pos.xz = mul(pos.xz, rotation_matrix(-timer));
-    
+    pos.xz += .1f;
+
     DistanceInfo distance;
     {
         distance = make_distance_info(windows_logo_3d_sdf(pos, 0.1f));
     }
     
     {
-        float light_sdf = length(max(abs(old_pos - float3(2.0, 2.0f, 0)) -
-                          float3(3.f, 0.01f, 3.f), 0.0f));
+		float3 light_pos = old_pos;
+		light_pos -= float3(0.0f, 2.0f, 0);
+		light_pos.xz = mul(light_pos.xz, rotation_matrix(-timer));
+
+        float light_sdf = length(max(abs(light_pos) -
+                                 float3(1.f, 0.01f, 10.25f), 0.0f));
 
         distance = combine_sdf(distance,
-                               make_distance_info(float2(light_sdf, 9.0f),
-                                                  float3(1, 1, 1)));
+                               make_distance_info(float2(light_sdf, 9.0f)));
 	}
 
     {
-        old_pos.y += 2.3f;
-        old_pos.xz += float2(sin(timer), cos(timer)) * cos(timer);
-        old_pos.xz += float2(sin(timer) + timer, cos(timer) + timer);
+        old_pos.zy = mul(old_pos.zy, rotation_matrix(sin(timer) * 0.3f));
+        old_pos.xz = mul(old_pos.xz, rotation_matrix(timer * 0.5f));
+        old_pos.y += 2.3;
+        old_pos.z += timer;
+
 
         float2 hexagon_board = hexagon_sdf(old_pos.xz, -old_pos.y);
         
@@ -322,8 +319,7 @@ struct HitInfo ray_march(Ray ray)
             HitInfo hit_info;
             hit_info.distance =
                 make_distance_info(float2(distance_traveled,
-                                          distance_to_closest.data.y),
-                                   distance_to_closest.material_info);
+                                          distance_to_closest.data.y));
 
             hit_info.step_count = i;
             
@@ -358,33 +354,57 @@ float3 calculate_normal(float3 p)
                             distance_function(p - h.yyx).data.x));
 }
 
-float3 random_in_unit_sphere(inout float2 seed)
+float3 random_in_unit_sphere(inout float2 seed, float3 nor)
 {
-    return normalize(hash32(seed) * 2.0f - 1.0f);     
+    float2 r = hash22(seed);
+
+    float3 uu = normalize(cross(nor, float3(0.0, 1.0, 1.0)));
+	float3 vv = cross(uu, nor);
+	
+	float ra = sqrt(r.y);
+	float rx = ra * cos(6.2831f * r.x); 
+	float ry = ra * sin(6.2831f *r.x);
+	float rz = sqrt(1.0f - r.y);
+	return normalize((float3)(rx*uu + ry*vv + rz*nor));
 }
 
-float4 ps_main(vs_out input) : SV_TARGET
+struct ps_out
 {
-    float2 coords = input.texture_coord;
+    float4 color : SV_Target0;
+    float4 normal : SV_Target1;
+};
 
-    const float slider = 0.8f;
+float pow2(float value) { return value * value; }
+
+ps_out ps_main(vs_out input)
+{
+    float2 coords = input.texture_coords;
+
+    const float slider = 0.9f;
     float3 ray_pos = float3(0, .8 - slider, 3.4f);
     float3 look_at = float3(0, .6 - slider, 2.8f);
     
     float2 seed = coords.xy;
-    float3 color_result = 0.0f;
-    const int total_samples = 5;
+    const int total_samples = 3;
+    int max_bounces = 4;
+    
+    ps_out result;
+    result.color = result.normal = 0.0f;
 
-    for (int j = 0; j < total_samples; ++j)
+    float2 pixel_size =
+        float2(1.0f / (1.0f / pixel_width * aspect_ratio), pixel_width);
+
+    int j = 0;
+    for (; j < total_samples; ++j)
     {
         float3 total_emission = 0.0f;
         float3 total_attenuation = 0.0f;
         
         Ray ray = look_at_ray(ray_pos, look_at,
                               to_radians(60.0f),
-                              coords + hash22(seed) * pixel_width * 2.0f);
+                              coords + hash22(seed) * pixel_size);
 
-        for (int i = 0; i < 6; ++i)
+        for (int i = 0; i < max_bounces; ++i)
         {
             HitInfo hit_info = ray_march(ray);
         
@@ -392,25 +412,33 @@ float4 ps_main(vs_out input) : SV_TARGET
             if (hit_info.step_count == MAX_STEPS ||
                 hit_info.distance.data.x >= MAX_DISTANCE)
             {
+                if (i == 0) total_attenuation = 1.0f;
+                
+                float3 background =
+                    pow2(abs(ray.dir.y + 0.5f) - 0.1f) * 0.1f;
+                result.color += 
+                    float4(background * total_attenuation, 0);
+                    
                 break;
             }
 
-            float3 hit_position =
-                ray.pos + hit_info.distance.data.x * ray.dir;
+            float3 hit_position = ray.pos + hit_info.distance.data.x * ray.dir;
             float3 hit_normal = calculate_normal(hit_position);
-
+            
             int hit_index = int(hit_info.distance.data.y);
             if (hit_index > 8)
             {
-				const float3 strength = hit_info.distance.material_info;
-                total_emission += i == 0 ? strength : strength * total_attenuation;
-                color_result += total_emission * 1.0f / float(total_samples);
+				const float3 strength = 0.9f;
+                total_emission = i == 0 ? strength : strength * total_attenuation;
+
+                result.color += float4(total_emission, 0);
+                result.normal += float4(hit_normal, 0);
                 break;
             }
             else
             {
                 float3 target = hit_normal +
-                                random_in_unit_sphere(seed);
+                                random_in_unit_sphere(seed, hit_normal);
 
                 ray.pos = hit_position + hit_normal * 0.003f;
                 ray.dir = normalize(target);
@@ -453,8 +481,138 @@ float4 ps_main(vs_out input) : SV_TARGET
                                     attenuation                    :
                                     total_attenuation * attenuation;
             }
+            
+            if (i == 0 && j == 0)
+            {
+                result.normal += float4(hit_normal, 0);
+            }
+
+            if (dot(total_attenuation, total_attenuation) < 0.01f)
+            {
+                break;
+            }
         }
     }
 
-    return float4(pow(color_result, 1.0f / 2.2f), 1.0f);
-}                           
+    result.color /= float(j == 0 ? 1 : j);
+    result.normal /= float(j == 0 ? 1 : j);
+    
+    result.color = pow(result.color, 1.0f / 2.0f);
+    
+    return result;
+}
+
+Texture2D color_texture : register(t0);
+Texture2D normal_texture : register(t1);
+SamplerState texture_sampler : register(s0);
+
+float4 sample_color_texture(float2 pos)
+{
+    return color_texture.Sample(texture_sampler, pos);
+}
+
+float4 sample_normal_texture(float2 pos)
+{
+    return normal_texture.Sample(texture_sampler, pos);
+}
+
+// based on https://www.shadertoy.com/view/ldKBzG
+float4 post_ps_main(vs_out input) : SV_TARGET
+{
+    float2 coords = float2(input.texture_coords.x,
+                           1.0f - input.texture_coords.y);
+	
+    float2 offset[25] = {
+        float2(-2,-2),
+        float2(-1,-2),
+        float2(0,-2),
+        float2(1,-2),
+        float2(2,-2),
+    
+        float2(-2,-1),
+        float2(-1,-1),
+        float2(0,-1),
+        float2(1,-1),
+        float2(2,-1),
+    
+        float2(-2,0),
+        float2(-1,0),
+        float2(0,0),
+        float2(1,0),
+        float2(2,0),
+    
+        float2(-2,1),
+        float2(-1,1),
+        float2(0,1),
+        float2(1,1),
+        float2(2,1),
+    
+        float2(-2,2),
+        float2(-1,2),
+        float2(0,2),
+        float2(1,2),
+        float2(2,2),
+    };
+    
+    float kernel[25] = {
+        1.0f/256.0f,
+        1.0f/64.0f,
+        3.0f/128.0f,
+        1.0f/64.0f,
+        1.0f/256.0f,
+    
+        1.0f/64.0f,
+        1.0f/16.0f,
+        3.0f/32.0f,
+        1.0f/16.0f,
+        1.0f/64.0f,
+    
+        3.0f/128.0f,
+        3.0f/32.0f,
+        9.0f/64.0f,
+        3.0f/32.0f,
+        3.0f/128.0f,
+    
+        1.0f/64.0f,
+        1.0f/16.0f,
+        3.0f/32.0f,
+        1.0f/16.0f,
+        1.0f/64.0f,
+    
+        1.0f/256.0f,
+        1.0f/64.0f,
+        3.0f/128.0f,
+        1.0f/64.0f,
+        1.0f/256.0f,
+    };
+
+    float4 sum = 0.0f;
+    float total_weight = 0.0f;
+    float4 center_color = sample_color_texture(coords);    
+    float4 center_normal = sample_normal_texture(coords);
+    float2 pixel_size =
+        float2(1.0f / (1.0f / pixel_width * aspect_ratio), pixel_width);
+
+    for (int i = 0; i < 25; i += 1)
+    {
+        float2 uv = coords + offset[i] * pixel_size;
+
+        float4 sample_color = sample_color_texture(uv);
+        float4 color_difference = center_color - sample_color;
+
+        float color_dist = dot(color_difference, color_difference);
+        float color_weight = min(exp(-color_dist), 1.0f);
+        
+        float4 sample_normal = sample_normal_texture(uv);
+        float4 normal_difference = center_normal - sample_normal;
+
+        float normal_dist = dot(normal_difference, normal_difference);
+        float normal_weight = min(exp(-normal_dist * 2.0f), 1.0f);
+
+        float weight = normal_weight * color_weight;
+        sum += sample_color * weight * kernel[i];
+        total_weight += weight * kernel[i];        
+    }
+    
+    return sum / total_weight; 
+}
