@@ -80,7 +80,7 @@ typedef struct
     ID3D11Device *device;
     ID3D11DeviceContext *device_context;
     
-    IDXGISwapChain1 *swap_chain;
+    IDXGISwapChain2 *swap_chain;
     
     ID3D11RenderTargetView *frame_buffer_view;
     
@@ -92,6 +92,8 @@ typedef struct
 
     RenderTexture render_textures[2];
     ID3D11SamplerState *render_texture_sampler;
+
+    HANDLE frame_latency_waitable_object;
     
     int width;
     int height;
@@ -108,7 +110,9 @@ static void get_client_size(HWND const window,
     *y = rect.bottom - rect.top;
 }
 
-__declspec(dllexport) unsigned long NvOptimusEnablement = 0x0000001;
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+
 
 static LRESULT __stdcall WindowProc(HWND const window_handle, UINT const message,
                                     WPARAM const wParam, LPARAM const lParam)
@@ -334,7 +338,7 @@ static void state_create_d3d_textures(State *const this)
                                                   .SampleDesc.Count = 1,
                                                   .Usage = D3D11_USAGE_DEFAULT,
                                                   .BindFlags = (D3D11_BIND_RENDER_TARGET |
-                                                                D3D11_BIND_SHADER_RESOURCE),    
+                                                                D3D11_BIND_SHADER_RESOURCE),
                                               }, NULL,
                                               &this->render_textures[i].texture);
 
@@ -370,7 +374,7 @@ static void state_setup_d3d(State *const this, bool is_windowed)
     
     D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE,
                       NULL, creation_flags, feature_levels,
-                      sizeof(feature_levels) / sizeof(*feature_levels),
+                      ARRAY_COUNT(feature_levels),
                       D3D11_SDK_VERSION, &this->device,
                       NULL, &this->device_context);
     
@@ -385,29 +389,39 @@ static void state_setup_d3d(State *const this, bool is_windowed)
         dxgi_device->lpVtbl->GetAdapter(dxgi_device, &dxgi_adapter);
         
         dxgi_adapter->lpVtbl->GetParent(dxgi_adapter,
-                                        &IID_IDXGIFactory4,
+                                        &IID_IDXGIFactory2,
                                         (void **)&dxgi_factory);
 
         dxgi_adapter->lpVtbl->Release(dxgi_adapter);
         dxgi_device->lpVtbl->Release(dxgi_device);
     }
-    
-    dxgi_factory->lpVtbl->CreateSwapChainForHwnd(dxgi_factory, (IUnknown *) this->device,
-                                                 this->window_handle,
-                                                 &(DXGI_SWAP_CHAIN_DESC1) {
-                                                     .Width = 0, // use window width
-                                                     .Height = 0, // use window height
-                                                     .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
-                                                     .Stereo = FALSE,
-                                                     .SampleDesc.Count = 1,
-                                                     .SampleDesc.Quality = 0,
-                                                     .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
-                                                     .BufferCount = 2,
-                                                     .Scaling = DXGI_SCALING_STRETCH,
-                                                     .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
-                                                     .AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED
-                                                 }, NULL, NULL, &this->swap_chain);
 
+    IDXGISwapChain1 *swap_chain1;
+    IDXGIFactory2_CreateSwapChainForHwnd(dxgi_factory, (IUnknown *) this->device,
+                                         this->window_handle,
+                                         (&(DXGI_SWAP_CHAIN_DESC1)
+                                          {
+                                              .Width = 0, // use window width
+                                              .Height = 0, // use window height
+                                              .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+                                              .Stereo = FALSE,
+                                              .SampleDesc.Count = 1,
+                                              .SampleDesc.Quality = 0,
+                                              .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
+                                              .BufferCount = 2,
+                                              .Scaling = DXGI_SCALING_STRETCH,
+                                              .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                                              .AlphaMode = DXGI_ALPHA_MODE_IGNORE,
+                                              .Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+                                          }), NULL, NULL, &swap_chain1);
+
+    IDXGISwapChain1_QueryInterface(swap_chain1,
+                                   &IID_IDXGISwapChain2,
+                                   (void **)&this->swap_chain);
+    
+    this->frame_latency_waitable_object =
+        IDXGISwapChain2_GetFrameLatencyWaitableObject(this->swap_chain);
+    
     if (!is_windowed)
     {
         this->swap_chain->lpVtbl->SetFullscreenState(this->swap_chain, false, NULL);
@@ -491,10 +505,10 @@ static void state_setup_d3d(State *const this, bool is_windowed)
         }                                                               \
                                                                         \
         void *const data = ID3D10Blob_GetBufferPointer(shader_blob);    \
-        DWORD const data_size = ID3D10Blob_GetBufferSize(shader_blob);  \
+        size_t const size = ID3D10Blob_GetBufferSize(shader_blob);      \
                                                                         \
         this->device->lpVtbl->CreatePixelShader(this->device,           \
-                                                data, data_size,        \
+                                                data, (DWORD)size,      \
                                                 NULL, &shader);         \
                                                                         \
         ID3D10Blob_Release(shader_blob);                                \
@@ -535,8 +549,9 @@ static void state_setup_d3d(State *const this, bool is_windowed)
                                          .AddressV = D3D11_TEXTURE_ADDRESS_CLAMP,
                                          .AddressW = D3D11_TEXTURE_ADDRESS_CLAMP,
                                      }), &this->render_texture_sampler);
+
     
-    // get the size of the portion of the window that we can draw to
+    // set the size of the portion of the window that we can draw to
     this->device_context->lpVtbl->RSSetViewports(this->device_context, 1,
                                                  &(D3D11_VIEWPORT) {
                                                      .Width = (float)this->width,
@@ -555,20 +570,23 @@ static void state_handle_resize(State *const this,
     {
         this->width = new_width;
         this->height = new_height;
-        return; 
+        return;
     }
     
     this->width = new_width;
     this->height = new_height;
 
+    ID3D11DeviceContext_ClearState(this->device_context);
+    
     state_destroy_d3d_textures(this);
     state_create_d3d_textures(this);
     
     // release frame_buffer view
     this->frame_buffer_view->lpVtbl->Release(this->frame_buffer_view);
-     
+    
     this->swap_chain->lpVtbl->ResizeBuffers(this->swap_chain, 0, 0, 0,
-                                            DXGI_FORMAT_UNKNOWN, 0);
+                                            DXGI_FORMAT_UNKNOWN,
+                                            DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT);
     
     ID3D11Texture2D *window_buffer;
     this->swap_chain->lpVtbl->GetBuffer(this->swap_chain, 0,
@@ -578,14 +596,11 @@ static void state_handle_resize(State *const this,
     this->device->lpVtbl->CreateRenderTargetView(this->device,
                                                  (ID3D11Resource *)window_buffer,
                                                  NULL, &this->frame_buffer_view);
-
+    
     // release the buffer
     window_buffer->lpVtbl->Release(window_buffer);
 
-    this->device_context->lpVtbl->OMSetRenderTargets(this->device_context, 1,
-                                                     &this->frame_buffer_view, NULL);
-
-    // get the size of the portion of the window that we can draw to
+    // set the size of the portion of the window that we can draw to
     this->device_context->lpVtbl->RSSetViewports(this->device_context, 1,
                                                  &(D3D11_VIEWPORT) {
                                                      .Width = (float)this->width,
@@ -598,17 +613,16 @@ static void state_handle_resize(State *const this,
 
 static void state_draw(State *const this)
 {
-    ID3D11DeviceContext_OMSetRenderTargets(this->device_context, 2,
-                                           ((ID3D11RenderTargetView*[]) {
-                                               this->render_textures[0].texture_view,
-                                               this->render_textures[1].texture_view
-                                           }), NULL);
-    
     // clear background color to black
     this->device_context->lpVtbl->ClearRenderTargetView(this->device_context,
                                                         this->frame_buffer_view,
                                                         (float[4]) {[3] = 1.0f});
 
+    ID3D11DeviceContext_OMSetRenderTargets(this->device_context, 2,
+                                           ((ID3D11RenderTargetView*[]) {
+                                               this->render_textures[0].texture_view,
+                                               this->render_textures[1].texture_view
+                                           }), NULL);
     
     this->device_context->lpVtbl->IASetPrimitiveTopology(this->device_context,
                                                          D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
@@ -655,7 +669,7 @@ static void state_draw(State *const this)
                                              (ID3D11ShaderResourceView*[2]){0});
     
     // swap the front/back buffer
-    this->swap_chain->lpVtbl->Present(this->swap_chain, 1, 0);
+    this->swap_chain->lpVtbl->Present(this->swap_chain, 0, 0);
 }
 
 #ifdef SHADER_HOT_RELOAD
@@ -765,6 +779,7 @@ static DWORD __stdcall render_thread(void *const context)
         
         float const current_time =
             (float)((double)counter_duration / (double)performance_frequency.QuadPart);
+
         
         // update shader constants
         {
@@ -784,13 +799,12 @@ static DWORD __stdcall render_thread(void *const context)
                                                  (ID3D11Resource *)
                                                  state->constant_buffer, 0);
         }
+
         
-        state_draw(state);
-        
-#ifdef SHADER_HOT_RELOAD
-        state_reload_shader(state, &old_file_attribute_data);
-#endif
-        
+        while(WaitForSingleObject(state->frame_latency_waitable_object, 0) == WAIT_TIMEOUT)
+        {
+        }
+
         {
             RECT rect;
             GetClientRect(state->window_handle, &rect);
@@ -799,6 +813,12 @@ static DWORD __stdcall render_thread(void *const context)
                                 rect.right - rect.left,
                                 rect.bottom - rect.top);
         }
+        
+        state_draw(state);
+        
+#ifdef SHADER_HOT_RELOAD
+        state_reload_shader(state, &old_file_attribute_data);
+#endif
     }
 }
 
@@ -1000,12 +1020,12 @@ void entry(void)
         {
             TranslateMessage(&message);
             DispatchMessageW(&message);
-
+            
             if (message.message == WM_QUIT)
             {
                 break;
             }
-
+            
             continue;
         }
     }
