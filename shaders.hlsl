@@ -244,7 +244,7 @@ float2 hexagon_sdf(float2 p, float pH)
     h2 = obj.z<obj.w ? float4(h2.xy, hC2.xy) : float4(h2.zw, hC2.zw);
 
     float offsets[4] = {
-        1, 2, 3, 0
+        4, 4, 4, 4
     };
     
     float2 oH = obj.x < obj.y ? float2(obj.x, offsets[0]) : float2(obj.y, offsets[2]);
@@ -260,8 +260,8 @@ DistanceInfo distance_function(float3 pos)
 
     pos.y += .5f;
     pos.xy = mul(pos.xy, rotation_matrix(timer));
-    pos.xz = mul(pos.xz, rotation_matrix(-timer));
-    pos.xz += .1f;
+    pos.xz = mul(pos.xz, rotation_matrix(timer));
+    pos.xz += .1f * sin(timer);
 
     DistanceInfo distance;
     {
@@ -269,16 +269,16 @@ DistanceInfo distance_function(float3 pos)
     }
     
     {
-		float3 light_pos = old_pos;
-		light_pos -= float3(0.0f, 2.0f, 0);
-		light_pos.xz = mul(light_pos.xz, rotation_matrix(-timer));
+        float3 light_pos = old_pos;
+        light_pos -= float3(0.0f, 2.0f, 0);
+        light_pos.xz = mul(light_pos.xz, rotation_matrix(-timer));
 
         float light_sdf = length(max(abs(light_pos) -
                                  float3(1.f, 0.01f, 10.25f), 0.0f));
 
         distance = combine_sdf(distance,
                                make_distance_info(float2(light_sdf, 9.0f)));
-	}
+    }
 
     {
         old_pos.zy = mul(old_pos.zy, rotation_matrix(sin(timer) * 0.3f));
@@ -333,7 +333,7 @@ struct HitInfo ray_march(Ray ray)
         }
     }
 
-    HitInfo hit_info;
+    HitInfo hit_info;   
     hit_info.distance = make_distance_info(float2(distance_traveled, -1));
     hit_info.step_count = i;
 
@@ -359,13 +359,13 @@ float3 random_in_unit_sphere(inout float2 seed, float3 nor)
     float2 r = hash22(seed);
 
     float3 uu = normalize(cross(nor, float3(0.0, 1.0, 1.0)));
-	float3 vv = cross(uu, nor);
-	
-	float ra = sqrt(r.y);
-	float rx = ra * cos(6.2831f * r.x); 
-	float ry = ra * sin(6.2831f *r.x);
-	float rz = sqrt(1.0f - r.y);
-	return normalize((float3)(rx*uu + ry*vv + rz*nor));
+    float3 vv = cross(uu, nor);
+    
+    float ra = sqrt(r.y);
+    float rx = ra * cos(6.2831f * r.x); 
+    float ry = ra * sin(6.2831f *r.x);
+    float rz = sqrt(1.0f - r.y);
+    return normalize((float3)(rx*uu + ry*vv + rz*nor));
 }
 
 struct ps_out
@@ -382,7 +382,7 @@ ps_out ps_main(vs_out input)
 
     const float slider = 0.9f;
     float3 ray_pos = float3(0, .8 - slider, 3.4f);
-    float3 look_at = float3(0, .6 - slider, 2.8f);
+    float3 look_at = float3(0, .6 - slider, 2.85f);
     
     float2 seed = coords.xy;
     const int total_samples = 3;
@@ -415,7 +415,8 @@ ps_out ps_main(vs_out input)
                 if (i == 0) total_attenuation = 1.0f;
                 
                 float3 background =
-                    pow2(abs(ray.dir.y + 0.5f) - 0.1f) * 0.1f;
+                    pow2(abs(ray.dir.y + 0.3f)  + hash12(seed) * 0.1f) * 0.25f;
+                    
                 result.color += 
                     float4(background * total_attenuation, 0);
                     
@@ -428,7 +429,7 @@ ps_out ps_main(vs_out input)
             int hit_index = int(hit_info.distance.data.y);
             if (hit_index > 8)
             {
-				const float3 strength = 0.9f;
+                const float3 strength = 0.9f;
                 total_emission = i == 0 ? strength : strength * total_attenuation;
 
                 result.color += float4(total_emission, 0);
@@ -496,9 +497,7 @@ ps_out ps_main(vs_out input)
 
     result.color /= float(j == 0 ? 1 : j);
     result.normal /= float(j == 0 ? 1 : j);
-    
-    result.color = pow(result.color, 1.0f / 2.0f);
-    
+        
     return result;
 }
 
@@ -521,7 +520,7 @@ float4 post_ps_main(vs_out input) : SV_TARGET
 {
     float2 coords = float2(input.texture_coords.x,
                            1.0f - input.texture_coords.y);
-	
+    
     float2 offset[25] = {
         float2(-2,-2),
         float2(-1,-2),
@@ -614,5 +613,5 @@ float4 post_ps_main(vs_out input) : SV_TARGET
         total_weight += weight * kernel[i];        
     }
     
-    return sum / total_weight; 
+    return pow(sum / total_weight, 1.0f / 2.2f); 
 }
