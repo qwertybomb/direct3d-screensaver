@@ -6,4 +6,4 @@ to test the screensaver run `prog.scr -s`
 # building
 to build the program make sure you have run vcvarsall.bat and then run `make`
 
-![](example.png)
+![](example2.png)
